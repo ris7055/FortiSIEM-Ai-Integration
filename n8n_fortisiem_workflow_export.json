@@ -1,0 +1,545 @@
+{
+  "name": "FortiSIEM SOC Incident Automation - Complete Flow",
+  "nodes": [
+    {
+      "parameters": {
+        "interval": [5],
+        "units": "minutes"
+      },
+      "id": "uuid-trigger-001",
+      "name": "Trigger - Poll FortiSIEM Every 5 Min",
+      "type": "n8n-nodes-base.interval",
+      "typeVersion": 1,
+      "position": [250, 100]
+    },
+    {
+      "parameters": {
+        "authentication": "bearerToken",
+        "url": "=https://{{$env.FORTISIEM_IP}}/phoenix/api/incidents?status=NEW",
+        "requestMethod": "GET",
+        "options": {}
+      },
+      "id": "uuid-http-001",
+      "name": "Get New Incidents from FortiSIEM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 100],
+      "credentials": {
+        "httpBearer": "fortisiem_api_token"
+      }
+    },
+    {
+      "parameters": {
+        "operations": "noOp",
+        "simple": true,
+        "jsonOutput": true
+      },
+      "id": "uuid-json-001",
+      "name": "Parse Incident Data",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [650, 100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.severity }}",
+              "operation": "notEmpty"
+            }
+          ]
+        }
+      },
+      "id": "uuid-if-001",
+      "name": "Filter Empty Incidents",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [850, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://{{$env.JIRA_INSTANCE}}/rest/api/3/issue",
+        "authentication": "bearerToken",
+        "requestBody": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "{\"project\": {\"key\": \"SOC\"}, \"issuetype\": {\"name\": \"Security Incident\"}, \"summary\": \"{{ $json.incident_name }}\", \"description\": \"FortiSIEM Incident ID: {{ $json.incident_id }}\\n\\nRule: {{ $json.rule_name }}\\nSource IP: {{ $json.source_ip }}\\nDestination IP: {{ $json.dest_ip }}\\n\\nDetection Time: {{ $json.detection_time }}\", \"priority\": {\"name\": \"{{ $json.severity }}\"}, \"labels\": [\"FortiSIEM\", \"Automated\", \"{{ $json.incident_id }}\"]}"
+            }
+          ]
+        }
+      },
+      "id": "uuid-jira-001",
+      "name": "Create Jira Ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 3,
+      "position": [1050, 100],
+      "credentials": {
+        "jiraApi": "jira_credentials"
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.virustotal.com/api/v3/ip_addresses/{{ $json.source_ip }}",
+        "requestMethod": "GET",
+        "authentication": "bearerToken"
+      },
+      "id": "uuid-http-vt-001",
+      "name": "Check IP with VirusTotal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 250],
+      "credentials": {
+        "httpBearer": "virustotal_api_key"
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://{{$env.FORTISIEM_IP}}/phoenix/api/threat_intel?ip={{ $json.source_ip }}",
+        "requestMethod": "GET",
+        "authentication": "bearerToken"
+      },
+      "id": "uuid-http-fg-001",
+      "name": "Check FortiGuard Threat Intel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1250, 250],
+      "credentials": {
+        "httpBearer": "fortisiem_api_token"
+      }
+    },
+    {
+      "parameters": {
+        "code": "// Consolidate threat intelligence\nconst vtData = $input.first().json;\nconst fgData = $input.first().json;\n\nconst riskScore = calculateRiskScore(vtData, fgData);\n\nreturn {\n  sourceIP: $json.source_ip,\n  virustotal: {\n    malicious: vtData?.data?.last_analysis_stats?.malicious || 0,\n    suspicious: vtData?.data?.last_analysis_stats?.suspicious || 0,\n    harmless: vtData?.data?.last_analysis_stats?.harmless || 0\n  },\n  fortiGuard: {\n    blacklisted: fgData?.blacklisted || false,\n    threatCategory: fgData?.threat_category || 'Unknown'\n  },\n  riskScore: riskScore,\n  recommendation: riskScore > 70 ? 'BLOCK_IP' : 'INVESTIGATE'\n};\n\nfunction calculateRiskScore(vt, fg) {\n  let score = 0;\n  if (vt?.data?.last_analysis_stats?.malicious > 3) score += 50;\n  if (fg?.blacklisted) score += 30;\n  if (vt?.data?.last_analysis_stats?.suspicious > 0) score += 10;\n  return Math.min(score, 100);\n}"
+      },
+      "id": "uuid-function-001",
+      "name": "Consolidate Threat Intel",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [1450, 250]
+    },
+    {
+      "parameters": {
+        "channel": "#soc-incidents",
+        "text": "=⚠️ NEW INCIDENT ALERT\nIncident ID: {{ $json.incident_id }}\nTicket: SOC-{{ $json.ticket_id }}\nSeverity: {{ $json.severity }}\nSource IP: {{ $json.source_ip }}\nRisk Score: {{ $json.risk_score }}/100\nRecommendation: {{ $json.recommendation }}"
+      },
+      "id": "uuid-slack-001",
+      "name": "Notify Slack - Incident Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [1650, 100],
+      "credentials": {
+        "slackApi": "slack_bot_token"
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://{{$env.FORTISIEM_IP}}/phoenix/api/incidents/{{ $json.incident_id }}",
+        "requestBody": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "status",
+              "value": "IN_PROGRESS"
+            },
+            {
+              "name": "ticket_id",
+              "value": "{{ $json.ticket_id }}"
+            },
+            {
+              "name": "risk_score",
+              "value": "{{ $json.risk_score }}"
+            }
+          ]
+        }
+      },
+      "id": "uuid-http-update-001",
+      "name": "Update Incident Status in FortiSIEM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1850, 100],
+      "credentials": {
+        "httpBearer": "fortisiem_api_token"
+      }
+    },
+    {
+      "parameters": {
+        "host": "{{$env.DB_HOST}}",
+        "user": "{{$env.DB_USER}}",
+        "password": "{{$env.DB_PASSWORD}}",
+        "database": "{{$env.DB_NAME}}",
+        "port": 5432,
+        "query": "INSERT INTO sla_tracking (tracking_id, incident_id, ticket_id, severity, created_at, sla_due_date, status, analyst) VALUES ($1, $2, $3, $4, NOW(), NOW() + INTERVAL '{{ $json.sla_hours }} hours', 'IN_PROGRESS', $5);",
+        "queryParameters": "={{ $json.tracking_id }},{{ $json.incident_id }},{{ $json.ticket_id }},{{ $json.severity }},{{ $json.analyst }}"
+      },
+      "id": "uuid-postgres-001",
+      "name": "Log to SLA Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2050, 100],
+      "credentials": {
+        "postgres": "postgres_credentials"
+      }
+    },
+    {
+      "parameters": {
+        "emailType": "smtp",
+        "fromEmail": "soc@company.com",
+        "toEmail": "={{ $json.customer_email }}",
+        "subject": "[SOC ALERT] Security Incident {{ $json.tracking_id }}",
+        "textOnly": false,
+        "htmlMessage": "<html><body><h2>Security Incident Notification</h2><p>We have detected suspicious activity on your network.</p><p><strong>Incident ID:</strong> {{ $json.tracking_id }}</p><p><strong>Severity:</strong> {{ $json.severity }}</p><p><strong>Status:</strong> Our team is actively investigating</p><p>You will receive updates within 4 hours.</p></body></html>"
+      },
+      "id": "uuid-email-001",
+      "name": "Send Customer Email Notification",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [2250, 100],
+      "credentials": {
+        "smtp": "smtp_credentials"
+      }
+    },
+    {
+      "parameters": {
+        "interval": [30],
+        "units": "minutes"
+      },
+      "id": "uuid-trigger-remediation",
+      "name": "Trigger - Check Remediation Status",
+      "type": "n8n-nodes-base.interval",
+      "typeVersion": 1,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://{{$env.FORTISIEM_IP}}/phoenix/api/incidents/{{ $json.incident_id }}/activity",
+        "requestMethod": "GET",
+        "authentication": "bearerToken"
+      },
+      "id": "uuid-http-verify",
+      "name": "Verify Threat Resolution",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 400],
+      "credentials": {
+        "httpBearer": "fortisiem_api_token"
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.recent_events }}",
+              "operation": "equals",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "uuid-if-resolved",
+      "name": "Check if Threat Resolved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://{{$env.JIRA_INSTANCE}}/rest/api/3/issue/{{ $json.ticket_id }}/transitions",
+        "authentication": "bearerToken",
+        "requestBody": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "transition",
+              "value": "{\"id\": \"5\"}"
+            }
+          ]
+        }
+      },
+      "id": "uuid-jira-close",
+      "name": "Close Jira Ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 3,
+      "position": [850, 400],
+      "credentials": {
+        "jiraApi": "jira_credentials"
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://{{$env.FORTISIEM_IP}}/phoenix/api/incidents/{{ $json.incident_id }}",
+        "requestBody": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "status",
+              "value": "RESOLVED"
+            },
+            {
+              "name": "verified_by",
+              "value": "{{ $json.analyst }}"
+            }
+          ]
+        }
+      },
+      "id": "uuid-http-close",
+      "name": "Mark Incident as Resolved",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 400],
+      "credentials": {
+        "httpBearer": "fortisiem_api_token"
+      }
+    },
+    {
+      "parameters": {
+        "host": "{{$env.DB_HOST}}",
+        "user": "{{$env.DB_USER}}",
+        "password": "{{$env.DB_PASSWORD}}",
+        "database": "{{$env.DB_NAME}}",
+        "port": 5432,
+        "query": "UPDATE sla_tracking SET status = 'RESOLVED', closed_at = NOW() WHERE incident_id = $1;",
+        "queryParameters": "={{ $json.incident_id }}"
+      },
+      "id": "uuid-postgres-close",
+      "name": "Update SLA Database - Resolved",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1250, 400],
+      "credentials": {
+        "postgres": "postgres_credentials"
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#soc-dashboard",
+        "text": "=✅ INCIDENT RESOLVED\nIncident ID: {{ $json.incident_id }}\nTicket: SOC-{{ $json.ticket_id }}\nResolution Time: {{ $json.resolution_time }} minutes\nSLA Status: {{ $json.sla_met ? 'MET' : 'EXCEEDED' }}"
+      },
+      "id": "uuid-slack-resolved",
+      "name": "Notify Slack - Incident Resolved",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [1450, 400],
+      "credentials": {
+        "slackApi": "slack_bot_token"
+      }
+    }
+  ],
+  "connections": {
+    "Trigger - Poll FortiSIEM Every 5 Min": {
+      "main": [
+        [
+          {
+            "node": "Get New Incidents from FortiSIEM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get New Incidents from FortiSIEM": {
+      "main": [
+        [
+          {
+            "node": "Parse Incident Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Incident Data": {
+      "main": [
+        [
+          {
+            "node": "Filter Empty Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Empty Incidents": {
+      "main": [
+        [
+          {
+            "node": "Create Jira Ticket",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check IP with VirusTotal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Jira Ticket": {
+      "main": [
+        [
+          {
+            "node": "Update Incident Status in FortiSIEM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check IP with VirusTotal": {
+      "main": [
+        [
+          {
+            "node": "Check FortiGuard Threat Intel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check FortiGuard Threat Intel": {
+      "main": [
+        [
+          {
+            "node": "Consolidate Threat Intel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consolidate Threat Intel": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack - Incident Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Slack - Incident Alert": {
+      "main": [
+        [
+          {
+            "node": "Update Incident Status in FortiSIEM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Incident Status in FortiSIEM": {
+      "main": [
+        [
+          {
+            "node": "Log to SLA Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to SLA Database": {
+      "main": [
+        [
+          {
+            "node": "Send Customer Email Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger - Check Remediation Status": {
+      "main": [
+        [
+          {
+            "node": "Verify Threat Resolution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Threat Resolution": {
+      "main": [
+        [
+          {
+            "node": "Check if Threat Resolved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Threat Resolved": {
+      "main": [
+        [
+          {
+            "node": "Close Jira Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close Jira Ticket": {
+      "main": [
+        [
+          {
+            "node": "Mark Incident as Resolved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Incident as Resolved": {
+      "main": [
+        [
+          {
+            "node": "Update SLA Database - Resolved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update SLA Database - Resolved": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack - Incident Resolved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "timezone": "UTC",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    "FortiSIEM",
+    "SOC",
+    "Security",
+    "Automation",
+    "Incident-Response"
+  ]
+}
